@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Сканер посылок</title>
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f0f2f5;
+    padding: 16px;
+    max-width: 600px;
+    margin: 0 auto;
+    min-height: 100vh;
+  }
+  h1 { font-size: 22px; margin-bottom: 16px; color: #222; text-align: center; }
+  .tabs { display: flex; gap: 8px; margin-bottom: 16px; }
+  .tab {
+    flex: 1; padding: 12px 8px; text-align: center;
+    background: white; border-radius: 10px;
+    cursor: pointer; font-weight: 600; color: #666;
+    border: 2px solid transparent;
+    font-size: 14px;
+    user-select: none;
+  }
+  .tab.active { color: #2563eb; border-color: #2563eb; }
+  .panel { display: none; }
+  .panel.active { display: block; }
+
+  #reader { width: 100%; border-radius: 12px; overflow: hidden; background: #000; min-height: 250px; }
+
+  .card {
+    background: white; border-radius: 12px;
+    padding: 16px; margin-bottom: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+  .card h3 { font-size: 17px; margin-bottom: 10px; color: #2563eb; word-break: break-all; }
+  .card p { font-size: 14px; color: #444; margin: 6px 0; }
+  .card .label { color: #888; font-size: 12px; font-weight: 600; }
+
+  input, button {
+    width: 100%; padding: 13px;
+    border-radius: 10px; font-size: 15px;
+    border: 1px solid #ddd; margin-bottom: 10px;
+    font-family: inherit;
+  }
+  input:focus { outline: none; border-color: #2563eb; }
+  button {
+    background: #2563eb; color: white;
+    border: none; font-weight: 600;
+    cursor: pointer;
+    transition: background .15s;
+  }
+  button:active { background: #1d4ed8; }
+  button.danger { background: #dc2626; }
+  button.success { background: #16a34a; }
+  button.orange { background: #ea580c; }
+  .empty { text-align: center; color: #999; padding: 30px; font-size: 15px; }
+  .found { border-left: 5px solid #16a34a; }
+  .notfound { border-left: 5px solid #dc2626; }
+  .info { border-left: 5px solid #2563eb; }
+
+  #barcode-preview {
+    display: none;
+    background: white;
+    padding: 16px;
+    border-radius: 12px;
+    text-align: center;
+    margin-bottom: 12px;
+  }
+  #barcode-preview svg { max-width: 100%; height: auto; }
+  #barcode-preview p {
+    font-family: monospace;
+    font-size: 16px;
+    font-weight: bold;
+    margin-top: 8px;
+    letter-spacing: 2px;
+  }
+
+  .badge {
+    position: fixed; bottom: 10px; right: 10px;
+    background: #16a34a; color: white;
+    padding: 6px 12px; border-radius: 20px;
+    font-size: 12px; font-weight: 600;
+    box-shadow: 0 2px 8px rgba(0,0,0,.2);
+    z-index: 999;
+  }
+</style>
+</head>
+<body>
+
+<h1>📦 Сканер посылок</h1>
+
+<div class="tabs">
+  <div class="tab active" data-tab="scan">📷 Сканер</div>
+  <div class="tab" data-tab="add">➕ Добавить</div>
+  <div class="tab" data-tab="list">📋 Список</div>
+</div>
+
+<!-- СКАНЕР -->
+<div class="panel active" id="panel-scan">
+  <div id="reader"></div>
+  <div id="result" style="margin-top:12px;"></div>
+</div>
+
+<!-- ДОБАВИТЬ -->
+<div class="panel" id="panel-add">
+  
+  <!-- Кнопка загрузки фото -->
+  <button onclick="document.getElementById('photo-input').click()" class="orange">
+    📁 Загрузить фото со штрих-кодом
+  </button>
+  <input type="file" id="photo-input" accept="image/*" style="display:none;" onchange="scanPhoto(event)">
+  
+  <div id="photo-status"></div>
+
+  <input id="in-track" placeholder="Трек-номер (RU123456789)" autocomplete="off">
+  <input id="in-person" placeholder="Кто заказал" autocomplete="off">
+  <input id="in-weight" placeholder="Вес в кг (2.5)" type="number" step="0.01" inputmode="decimal">
+  <input id="in-desc" placeholder="Что в посылке" autocomplete="off">
+  
+  <button onclick="generateBarcode()" class="success" style="margin-bottom: 16px;">📊 Сгенерировать штрих-код</button>
+  
+  <div id="barcode-preview">
+    <svg id="barcode-svg"></svg>
+    <p id="barcode-text"></p>
+    <button onclick="saveBarcodeImage()" style="margin-top: 12px;">💾 Скачать картинку</button>
+  </div>
+
+  <button onclick="savePackage()">💾 Сохранить посылку в базу</button>
+</div>
+
+<!-- СПИСОК -->
+<div class="panel" id="panel-list">
+  <div id="list"></div>
+</div>
+
+<script>
+// ============ ХРАНИЛИЩЕ ============
+const STORAGE_KEY = 'packages_db_v1';
+
+function loadDB() {
+  try {
+    return JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+  } catch (e) {
+    return {};
+  }
+}
+function saveDB(db) {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(db));
+}
+
+// ============ ТАБЫ ============
+let scannerRunning = false;
+
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.onclick = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
+
+    if (tab.dataset.tab === 'scan') {
+      startScanner();
+    } else {
+      stopScanner();
+    }
+    if (tab.dataset.tab === 'list') {
+      renderList();
+    }
+  };
+});
+
+// ============ РАСПОЗНАВАНИЕ ШТРИХ-КОДА С ФОТО ============
+function scanPhoto(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+
+  const statusEl = document.getElementById('photo-status');
+  statusEl.innerHTML = '<div class="card info">⏳ Распознаю штрих-код на фото...</div>';
+
+  // Создаем временный сканер для обработки файла
+  const tempScanner = new Html5Qrcode("photo-temp");
+  
+  // Создаем скрытый div для сканера
+  if (!document.getElementById('photo-temp')) {
+    const div = document.createElement('div');
+    div.id = 'photo-temp';
+    div.style.display = 'none';
+    document.body.appendChild(div);
+  }
+
+  tempScanner.scanFile(file, true)
+    .then(decodedText => {
+      // Успешно распознали!
+      document.getElementById('in-track').value = decodedText.toUpperCase();
+      statusEl.innerHTML = `<div class="card found">
+        <h3>✅ Распознан трек-номер:</h3>
+        <p style="font-size:18px;font-weight:bold;font-family:monospace;">${escapeHtml(decodedText)}</p>
+        <p style="color:#666;font-size:13px;margin-top:8px;">
+          Заполните остальные поля вручную и нажмите «Сохранить».
+        </p>
+      </div>`;
+      
+      // Очищаем input, чтобы можно было загрузить то же фото снова
+      event.target.value = '';
+      
+      // Очищаем временный сканер
+      tempScanner.clear();
+    })
+    .catch(err => {
+      statusEl.innerHTML = `<div class="card notfound">
+        <h3>❌ Не удалось распознать</h3>
+        <p>На фото не найден штрих-код. Убедитесь, что:</p>
+        <ul style="margin-top:8px;padding-left:20px;font-size:14px;color:#666;">
+          <li>Штрих-код четкий и не размытый</li>
+          <li>Он полностью попал в кадр</li>
+          <li>Освещение хорошее</li>
+        </ul>
+        <p style="margin-top:8px;font-size:13px;color:#999;">Попробуйте другое фото или введите номер вручную.</p>
+      </div>`;
+      event.target.value = '';
+      tempScanner.clear();
+    });
+}
+
+// ============ ГЕНЕРАЦИЯ ШТРИХ-КОДА ============
+function generateBarcode() {
+  const track = document.getElementById('in-track').value.trim().toUpperCase();
+  
+  if (!track) {
+    alert('Сначала введите или отсканируйте трек-номер!');
+    return;
+  }
+
+  const preview = document.getElementById('barcode-preview');
+  const svg = document.getElementById('barcode-svg');
+  const textEl = document.getElementById('barcode-text');
+
+  try {
+    JsBarcode(svg, track, {
+      format: "CODE128",
+      width: 2,
+      height: 80,
+      displayValue: true,
+      fontSize: 16,
+      margin: 10
+    });
+    
+    textEl.textContent = track;
+    preview.style.display = 'block';
+    preview.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  } catch (e) {
+    alert('Ошибка: трек-номер содержит недопустимые символы для штрих-кода. Используйте только латиницу и цифры.');
+  }
+}
+
+function saveBarcodeImage() {
+  const svg = document.getElementById('barcode-svg');
+  const track = document.getElementById('in-track').value.trim().toUpperCase();
+  
+  const svgData = new XMLSerializer().serializeToString(svg);
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  const img = new Image();
+  
+  canvas.width = 800;
+  canvas.height = 300;
+  
+  const svgBlob = new Blob([svgData], {type: 'image/svg+xml;charset=utf-8'});
+  const url = URL.createObjectURL(svgBlob);
+  
+  img.onload = function() {
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 50, 50, 700, 150);
+    
+    ctx.fillStyle = 'black';
+    ctx.font = 'bold 30px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText(track, canvas.width / 2, 250);
+    
+    const link = document.createElement('a');
+    link.download = 'barcode_' + track + '.png';
+    link.href = canvas.toDataURL('image/png');
+    link.click();
+    
+    URL.revokeObjectURL(url);
+  };
+  
+  img.src = url;
+}
+
+// ============ СОХРАНЕНИЕ ============
+function savePackage() {
+  const track = document.getElementById('in-track').value.trim().toUpperCase();
+  const person = document.getElementById('in-person').value.trim();
+  const weight = document.getElementById('in-weight').value.trim();
+  const desc = document.getElementById('in-desc').value.trim();
+
+  if (!track) {
+    alert('Введите или отсканируйте трек-номер');
+    return;
+  }
+
+  const db = loadDB();
+  db[track] = { person, weight, desc, addedAt: Date.now() };
+  saveDB(db);
+
+  document.getElementById('in-track').value = '';
+  document.getElementById('in-person').value = '';
+  document.getElementById('in-weight').value = '';
+  document.getElementById('in-desc').value = '';
+  document.getElementById('barcode-preview').style.display = 'none';
+  document.getElementById('photo-status').innerHTML = '';
+
+  alert('✅ Сохранено: ' + track);
+}
+
+// ============ СПИСОК ============
+function renderList() {
+  const db = loadDB();
+  const keys = Object.keys(db);
+  const el = document.getElementById('list');
+
+  if (!keys.length) {
+    el.innerHTML = '<div class="empty">Пока нет посылок.<br>Добавь через вкладку ➕</div>';
+    return;
+  }
+
+  el.innerHTML = keys.map(k => {
+    const p = db[k];
+    return `<div class="card">
+      <h3>${escapeHtml(k)}</h3>
+      <p><span class="label">Заказчик:</span> ${escapeHtml(p.person || '—')}</p>
+      <p><span class="label">Вес:</span> ${escapeHtml(p.weight || '—')} кг</p>
+      <p><span class="label">Содержимое:</span> ${escapeHtml(p.desc || '—')}</p>
+      <button class="danger" onclick="del('${escapeAttr(k)}')">🗑 Удалить</button>
+    </div>`;
+  }).join('');
+}
+
+function del(key) {
+  if (!confirm('Удалить ' + key + '?')) return;
+  const db = loadDB();
+  delete db[key];
+  saveDB(db);
+  renderList();
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+function escapeAttr(s) {
+  return String(s).replace(/'/g, "\\'").replace(/"/g, '&quot;');
+}
+
+// ============ СКАНЕР (КАМЕРА) ============
+let scanner = null;
+let lastScan = { code: '', time: 0 };
+
+function startScanner() {
+  if (scannerRunning) return;
+
+  const readerEl = document.getElementById('reader');
+  if (!readerEl) return;
+
+  scanner = new Html5Qrcode("reader");
+  scannerRunning = true;
+
+  scanner.start(
+    { facingMode: "environment" },
+    {
+      fps: 10,
+      qrbox: { width: 300, height: 300 },
+      experimentalFeatures: {
+        useBarCodeDetectorIfSupported: true
+      },
+      formatsToSupport: [
+        Html5QrcodeSupportedFormats.CODE_128,
+        Html5QrcodeSupportedFormats.CODE_39,
+        Html5QrcodeSupportedFormats.ITF
+      ]
+    },
+    onScan,
+    () => {}
+  ).catch(err => {
+    scannerRunning = false;
+    document.getElementById('result').innerHTML =
+      `<div class="card notfound">
+        <h3>⚠️ Камера недоступна</h3>
+        <p>${escapeHtml(String(err))}</p>
+      </div>`;
+  });
+}
+
+function stopScanner() {
+  if (!scanner || !scannerRunning) return;
+  scannerRunning = false;
+  scanner.stop().then(() => {
+    scanner.clear();
+    scanner = null;
+  }).catch(() => {
+    scanner = null;
+  });
+}
+
+function onScan(text) {
+  const now = Date.now();
+  if (text === lastScan.code && now - lastScan.time < 2500) return;
+  lastScan = { code: text, time: now };
+
+  const db = loadDB();
+  const key = text.toUpperCase().trim();
+  const p = db[key];
+  const el = document.getElementById('result');
+
+  if (p) {
+    el.innerHTML = `<div class="card found">
+      <h3>✅ ${escapeHtml(key)}</h3>
+      <p><span class="label">Заказчик:</span> ${escapeHtml(p.person || '—')}</p>
+      <p><span class="label">Вес:</span> ${escapeHtml(p.weight || '—')} кг</p>
+      <p><span class="label">Содержимое:</span> ${escapeHtml(p.desc || '—')}</p>
+    </div>`;
+    if (navigator.vibrate) navigator.vibrate(120);
+  } else {
+    el.innerHTML = `<div class="card notfound">
+      <h3>❓ ${escapeHtml(key)}</h3>
+      <p>Такой трек-номер не найден в базе.</p>
+      <button class="success" style="margin-top:12px;"
+        onclick="prefillAdd('${escapeAttr(key)}')">➕ Добавить эту посылку</button>
+    </div>`;
+    if (navigator.vibrate) navigator.vibrate([80, 60, 80]);
+  }
+}
+
+function prefillAdd(track) {
+  document.getElementById('in-track').value = track;
+  document.querySelector('.tab[data-tab="add"]').click();
+}
+
+window.addEventListener('load', () => {
+  // Ничего не делаем — сканер запустится при клике на вкладку
+});
+</script>
+
+</body>
+</html>
